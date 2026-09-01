@@ -6,27 +6,33 @@ disclosures ("Keterbukaan Informasi") from the [Indonesia Stock Exchange
 
 ## How it works
 
-IDX's disclosure pages sit behind Cloudflare. This tool does not attempt to
-defeat that protection in any way. No TLS/JA3 fingerprint spoofing, no
-stealth browser patches, no challenge-solving. Instead it drives a real,
-unmodified Chromium-based browser (Brave by default) over the Chrome DevTools
-Protocol, exactly the way a person would: it opens the page and waits for
-Cloudflare's JS challenge to clear on its own.
+IDX's disclosure pages and file host sit behind Cloudflare. By default,
+`maddo` reaches them with an HTTP client (`wreq`) built to present a real
+Chrome TLS/HTTP2/JA3 handshake — the same fingerprint a real Chrome install
+sends — rather than by defeating a challenge Cloudflare is actively
+presenting. No headless-browser stealth patches, no CAPTCHA/JS-challenge
+solving. A bare `curl`/`reqwest` request gets blocked here even with a
+browser-like `User-Agent`; matching Chrome's actual handshake is what gets
+through.
 
-Once the browser tab is past the challenge, every subsequent operation
-(listing, filtering, downloading) is a same-origin `fetch()` call executed
-*inside that tab*, so it automatically inherits the tab's genuine session
-cookies. This is session reuse, not evasion: the browser already earned
-that access normally, and reusing its cookies for further requests is the
-same thing any web page does for its own asset and API calls.
+Pass `--browser` to fall back to the original approach instead: a real,
+unmodified Chromium-based browser (Brave by default) driven over the Chrome
+DevTools Protocol, exactly the way a person would — it opens the page and
+waits for Cloudflare's JS challenge to clear on its own, then every
+subsequent operation is a same-origin `fetch()` executed *inside that tab*,
+inheriting its genuine session cookies. This fallback exists for if/when
+IDX's Cloudflare rules tighten enough to block the default transport's
+fingerprint too.
 
-Two consequences follow directly from this design:
+Two consequences follow from this:
 
-- **Headless mode is not supported.** Cloudflare's challenge frequently
-  blocks headless browser sessions. This tool does not work around that.
-  If `--headless` fails for you, that's the site's bot detection doing its
-  job. Run headed, or headed inside `xvfb-run` on a server without a
-  display.
+- **Headless mode is only relevant to `--browser`, and still not
+  supported there.** Cloudflare's challenge frequently blocks headless
+  browser sessions, and this tool does not work around that. If
+  `--browser --headless` fails for you, that's the site's bot detection
+  doing its job. Run headed, or headed inside `xvfb-run` on a server
+  without a display. (The default, non-`--browser` transport has no
+  headless/headed distinction — it never opens a browser window.)
 - **The underlying API is IDX's own.** Rather than scraping the rendered
   DOM, `maddo` calls the exact internal endpoint
   (`/primary/ListedCompany/GetAnnouncement`) that the site's own frontend
@@ -38,10 +44,11 @@ Two consequences follow directly from this design:
 ## Requirements
 
 - Rust (2024 edition toolchain)
-- A Chromium-based browser installed locally (Brave, Chrome, Chromium, or
-  Edge). The default `--browser-path` is `/usr/bin/brave`; override it with
-  `--browser-path` or edit the default in `src/main.rs` if your browser
-  lives elsewhere.
+- Only for `--browser`: a Chromium-based browser installed locally (Brave,
+  Chrome, Chromium, or Edge). The default `--browser-path` is
+  `/usr/bin/brave`; override it with `--browser-path` or edit the default
+  in `src/main.rs` if your browser lives elsewhere. Not needed for normal
+  use.
 
 ## Build
 
@@ -92,7 +99,8 @@ maddo watch --json
 The first poll only establishes a baseline. It does not print IDX's entire
 matching history as "new". Every poll after that reports (and, with
 `--download`, downloads) whatever wasn't seen before. Press `Ctrl+C` to
-stop; the browser process is shut down cleanly rather than left running.
+stop; with `--browser`, the browser process is shut down cleanly rather
+than left running.
 
 ## Filtering options
 
@@ -116,8 +124,9 @@ looks at the current head of the feed.
 
 | Flag | Description |
 | --- | --- |
-| `--browser-path <PATH>` | Path to a Chromium-based browser executable. Default: `/usr/bin/brave`. |
-| `--headless` | Run headless. Unsupported by Cloudflare on this site in practice; see [How it works](#how-it-works). |
+| `--browser` | Use the `--browser` fallback (real Chromium-based browser over CDP) instead of the default `wreq`-based HTTP transport. |
+| `--browser-path <PATH>` | Path to a Chromium-based browser executable. Only used with `--browser`. Default: `/usr/bin/brave`. |
+| `--headless` | Run the `--browser` fallback headless. Unsupported by Cloudflare on this site in practice; see [How it works](#how-it-works). Only used with `--browser`. |
 | `--delay-ms <MS>` | Pause between paginated/batched requests. Default: `800`. Keeps the tool from hammering IDX's servers. |
 
 ## Project layout
@@ -125,9 +134,11 @@ looks at the current head of the feed.
 ```
 src/
   main.rs      CLI definition (clap) and command orchestration
-  browser.rs   Browser session lifecycle: launch, navigate, wait past the Cloudflare challenge
-  api.rs       Typed client for IDX's internal GetAnnouncement API
-  download.rs  Batched in-tab file downloads (fetch + base64, decoded and written to disk)
+  backend.rs   Backend enum unifying the two transports (Http default, Browser fallback)
+  http.rs      Default transport: wreq client impersonating a real Chrome TLS/HTTP2/JA3 handshake
+  browser.rs   --browser fallback: browser session lifecycle over CDP, wait past the Cloudflare challenge
+  api.rs       Typed client for IDX's internal GetAnnouncement API (both transports)
+  download.rs  Batched file downloads (both transports)
 ```
 
 ## Data source and scope

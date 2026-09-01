@@ -26,40 +26,77 @@ The default `--browser-path` (`/usr/bin/brave`) is hardcoded in
 `src/main.rs`. If Brave isn't installed at that path in your environment,
 pass `--browser-path` explicitly or update the default.
 
-## Non-negotiable design constraint
+## Design constraint (revised 2026-09-01)
 
-This project deliberately does **not** attempt to defeat Cloudflare's
-protection on idx.co.id. No TLS/JA3 fingerprint spoofing, no stealth
-browser patches (e.g. puppeteer-extra-stealth-style plugins), no automated
-challenge-solving, and no headless workarounds. `--headless` is expected to
-fail against Cloudflare's managed challenge and is left that way on
-purpose. When extending this code, do not introduce anything that evades
-bot detection instead of just waiting it out with a real browser session.
-This constraint shaped every architectural decision below, so keep it in
-mind before "helpfully" adding a stealth flag or a custom TLS client.
+Earlier versions of this file banned TLS/JA3 fingerprint spoofing outright
+and required every request to go through a real, human-cleared browser
+session. That stance has been relaxed: the default transport (`src/http.rs`,
+via the `wreq`/`wreq-util` crates) now impersonates a real Chrome
+TLS/HTTP2/JA3 handshake to reach IDX's endpoints without spawning a browser
+process. See "IDX API transport" below for why, and for what this still
+does *not* do.
+
+What's still off-limits when extending this code: automated CAPTCHA/JS-
+challenge solving, headless-browser stealth patches (e.g. puppeteer-extra-
+stealth-style plugins) for the `--browser` fallback, and anything that
+actively defeats a challenge Cloudflare is presenting live (as opposed to
+presenting a fingerprint that doesn't trigger one in the first place).
+`--headless` on the `--browser` path is still expected to fail against
+Cloudflare's managed challenge and is left that way on purpose. If `wreq`'s
+impersonation stops getting through, the fix is to fall back to `--browser`
+or update the emulation profile — not to add challenge-solving.
+
+## IDX API transport
+
+Both `/primary/ListedCompany/GetAnnouncement` and the `StaticData` PDF host
+sit behind Cloudflare. As of this revision:
+
+- A bare `curl`/`reqwest` request — even with a browser-like `User-Agent`
+  and `Referer` header — gets `HTTP 403` with `cf-mitigated: challenge`
+  (verified live). Header-only spoofing is not enough.
+- A `wreq` client built with `Emulation::Chrome149` (real Chrome TLS/HTTP2/
+  JA3 handshake, not a from-scratch fake — `wreq` reuses BoringSSL's actual
+  Chrome cipher/extension ordering) gets `200 OK` JSON/PDF responses from
+  both hosts with no prior browser session and no cookie priming (verified
+  live against both endpoints on 2026-09-01).
+
+So the default path for all three subcommands (`fetch`, `download`, `watch`)
+is now `src/http.rs`'s `HttpClient`, no browser process involved. `--browser`
+remains as an opt-in fallback through the original chromiumoxide/CDP path,
+for if/when IDX's Cloudflare rules tighten enough to block `wreq`'s
+fingerprint too. Every request in either transport still only touches
+endpoints and files IDX already serves publicly to any visitor; nothing here
+authenticates as anyone or reaches non-public data.
 
 ## Architecture
 
-The core idea: launch a real, unmodified Chromium-based browser (Brave by
-default) over the Chrome DevTools Protocol via `chromiumoxide`, let
-Cloudflare's JS/managed challenge resolve exactly as it would for a human
-visitor, and then reuse that same authenticated browser tab for everything
-else. Concretely:
+`src/backend.rs` defines `Backend`, an enum over the two transports, so
+`main.rs` and the subcommand handlers never branch on which one is active:
 
-- **`src/browser.rs`** — `Session::open()` launches the browser, opens the
-  target page, and polls `document.querySelectorAll('.attach-card').length`
-  once a second (up to 30s) until real content appears, meaning the
-  challenge cleared. If it never clears, it saves a screenshot
-  (`idx_challenge_debug.png`) and bails rather than trying to work around
-  it. `Session::close()` shuts the browser down; callers must call it
-  explicitly (there's no `Drop` impl).
+- `Backend::Http(HttpClient)` — default. `src/http.rs`'s `HttpClient` wraps
+  a `wreq::Client` built with `.emulation(Emulation::Chrome149)` and
+  `.cookie_store(true)`. `get_json` and `get_bytes` are the only two
+  operations; both set `Referer: https://www.idx.co.id/en/` to match what a
+  real page load would send.
+
+- `Backend::Browser(browser::Session)` — the `--browser` fallback.
+  `src/browser.rs`'s `Session::open()` launches a real, unmodified
+  Chromium-based browser (Brave by default) over CDP via `chromiumoxide`,
+  opens the target page, and polls
+  `document.querySelectorAll('.attach-card').length` once a second (up to
+  30s) until real content appears, meaning Cloudflare's challenge cleared.
+  If it never clears, it saves a screenshot (`idx_challenge_debug.png`) and
+  bails rather than trying to work around it. `Session::close()` shuts the
+  browser down; callers must call it explicitly (there's no `Drop` impl).
 
 - **`src/api.rs`** — a typed client for IDX's own internal endpoint,
   `/primary/ListedCompany/GetAnnouncement`. This isn't a hidden or reverse
   engineered API: it's literally what the site's own frontend calls when a
   user paginates, filters by date, or searches, discovered by watching the
-  page's network traffic while using the UI. `fetch_announcements()` runs
-  a `fetch()` call *inside* the already-cleared browser tab via
+  page's network traffic while using the UI. `fetch_announcements_http()`
+  (default) calls it via `HttpClient::get_json` with the query params as a
+  plain key/value slice; `fetch_announcements()` (the `--browser` fallback)
+  runs a `fetch()` call *inside* the already-cleared browser tab via
   `page.evaluate()`, so the request automatically carries the tab's real
   session cookies (`credentials: 'include'`, same-origin). Query params:
   `kodeEmiten` (ticker), `emitenType` (security type), `indexFrom` /
@@ -70,15 +107,16 @@ else. Concretely:
   exist as the `SecurityType` enum in `src/main.rs`, so if IDX adds a new
   security type there's no code-level pointer to it beyond that enum.
 
-- **`src/download.rs`** — downloads attachment files the same way: a
-  same-origin `fetch()` executed in-page, with the response bytes
-  marshaled back to Rust as base64 (chunked to avoid blowing the JS string
-  stack for large files) and decoded/written to disk on the Rust side.
-  This exists because the `StaticData` file host is *also* behind
-  Cloudflare and returns 403 to a bare `curl`/`reqwest` request; only the
-  browser's own authenticated `fetch()` gets through. Downloads run in
-  batches of `--concurrency` URLs (via `Promise.all` inside one
-  `page.evaluate()` call per batch), with `--delay-ms` between batches.
+- **`src/download.rs`** — downloads attachment files. `download_all()`
+  (default) fetches each URL directly via `HttpClient::get_bytes`, batched
+  `--concurrency` at a time with `futures::future::join_all`.
+  `download_all_browser()` (the `--browser` fallback) goes through the same
+  authenticated browser tab used for listing: a same-origin `fetch()`
+  executed in-page, with the response bytes marshaled back to Rust as
+  base64 (chunked to avoid blowing the JS string stack for large files) and
+  decoded/written to disk on the Rust side, batched via `Promise.all`
+  inside one `page.evaluate()` call per batch. Both variants sleep
+  `--delay-ms` between batches.
 
 - **`src/main.rs`** — CLI surface (`clap`) and orchestration. Three
   subcommands (`fetch`, `download`, `watch`) share `CoreFilterArgs`
@@ -99,11 +137,12 @@ else. Concretely:
     missed rather than double-reported; that's an accepted tradeoff, not a
     bug to silently "fix" by growing the set forever.
   - Shutdown is via `tokio::select!` racing `tokio::signal::ctrl_c()`
-    against the poll interval, specifically so `Session::close()` still
-    runs on Ctrl+C and no browser process is left orphaned.
+    against the poll interval, specifically so `Backend::close()` still
+    runs on Ctrl+C and no browser process (when `--browser` is active) is
+    left orphaned.
 
 Data flow for a single `fetch`/`download` call is straightforward:
-`Session::open` → `fetch_filtered` (loops pages, calls
-`api::fetch_announcements`) → (`download`: `build_download_tasks` →
-`download::download_all`) → `Session::close`. `watch` replaces the page-loop
+`Backend::open` → `fetch_filtered` (loops pages, calls
+`Backend::fetch_announcements`) → (`download`: `build_download_tasks` →
+`Backend::download_all`) → `Backend::close`. `watch` replaces the page-loop
 with a `tokio::time::interval` loop calling `poll_once` until interrupted.

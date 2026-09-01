@@ -1,10 +1,13 @@
 // Typed client for IDX's own internal disclosure API
 // (`/primary/ListedCompany/GetAnnouncement`), the exact endpoint the site's own
-// frontend calls when you paginate, filter by date, or search. Called here via
-// `fetch()` executed inside the already-challenge-cleared browser tab, so it inherits
-// that tab's genuine session cookies (same-origin, `credentials: 'include'`). This is
-// session reuse, not evasion: the browser already earned this access normally.
+// frontend calls when you paginate, filter by date, or search.
+//
+// Two transports call it: `fetch_announcements_http` (default) via the impersonating
+// `HttpClient` in `http.rs`, and `fetch_announcements` (the `--browser` fallback) via
+// `fetch()` executed inside the already-challenge-cleared browser tab, inheriting that
+// tab's genuine session cookies (same-origin, `credentials: 'include'`).
 
+use crate::http::HttpClient;
 use anyhow::{Context, Result};
 use chromiumoxide::Page;
 use serde::{Deserialize, Serialize};
@@ -81,6 +84,27 @@ pub struct ApiResponse {
     pub result_count: u64,
     #[serde(rename = "Replies")]
     pub replies: Vec<Reply>,
+}
+
+pub async fn fetch_announcements_http(client: &HttpClient, params: &QueryParams) -> Result<ApiResponse> {
+    let index_from = params.index_from.to_string();
+    let page_size = params.page_size.to_string();
+    let ticker = params.ticker.as_deref().unwrap_or("");
+    let keyword = params.keyword.as_deref().unwrap_or("");
+    let query = [
+        ("kodeEmiten", ticker),
+        ("emitenType", params.emiten_type.as_str()),
+        ("indexFrom", index_from.as_str()),
+        ("pageSize", page_size.as_str()),
+        ("dateFrom", params.date_from.as_str()),
+        ("dateTo", params.date_to.as_str()),
+        ("lang", params.lang.as_str()),
+        ("keyword", keyword),
+    ];
+    client
+        .get_json("https://www.idx.co.id/primary/ListedCompany/GetAnnouncement", &query)
+        .await
+        .context("calling IDX GetAnnouncement API")
 }
 
 pub async fn fetch_announcements(page: &Page, params: &QueryParams) -> Result<ApiResponse> {

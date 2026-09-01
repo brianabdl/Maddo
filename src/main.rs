@@ -1,17 +1,20 @@
 //! Maddo: a CLI for IDX's public "Keterbukaan Informasi" (listed-company disclosures) feed.
 //!
-//! Drives a real, unmodified Chromium-based browser over CDP so Cloudflare's
-//! JS/managed challenge on idx.co.id resolves exactly as it would for a normal human
-//! visitor. Every subsequent request (listing, filtering, downloading) goes through
-//! same-origin `fetch()` calls executed *inside* that already-cleared browser tab, so
-//! they inherit its genuine session cookies. This is session reuse, not evasion: no
-//! TLS/JA3 spoofing, no stealth patches, no challenge-solving, no headless workarounds.
-//! Headless mode is left unsupported on purpose: if Cloudflare blocks it, that's its
-//! bot detection doing its job.
+//! By default, requests go through `wreq` (see `http.rs`), which presents a real Chrome
+//! TLS/HTTP2/JA3 handshake without spawning a browser. Pass `--browser` to fall back to
+//! driving a real, unmodified Chromium-based browser over CDP instead (see `browser.rs`):
+//! it opens the page, waits for Cloudflare's JS/managed challenge to clear as it would
+//! for a normal human visitor, then runs same-origin `fetch()` calls *inside* that tab so
+//! they inherit its genuine session cookies. See CLAUDE.md's "IDX API transport" section
+//! for why the default changed and what it does and doesn't attempt. Headless browser
+//! mode is left unsupported on purpose: if Cloudflare blocks it, that's its bot detection
+//! doing its job.
 
 mod api;
+mod backend;
 mod browser;
 mod download;
+mod http;
 
 use anyhow::{Context, Result};
 use api::QueryParams;
@@ -25,12 +28,19 @@ use std::time::Duration;
 #[derive(Parser)]
 #[command(name = "maddo", version, about)]
 struct Cli {
+    /// Use a real Chromium-based browser (via CDP) instead of the default impersonating
+    /// HTTP client. Fallback for if/when the default transport stops getting through.
+    #[arg(long, global = true)]
+    browser: bool,
+
     /// Path to a Chromium-based browser executable (Chrome, Chromium, Brave, Edge...).
+    /// Only used with --browser.
     #[arg(long, global = true, default_value = "/usr/bin/brave")]
     browser_path: String,
 
-    /// Run the browser headless. Cloudflare's challenge frequently blocks headless
-    /// sessions; this is not worked around here on purpose. Default is headed.
+    /// Run the browser headless. Only used with --browser; Cloudflare's challenge
+    /// frequently blocks headless sessions and this is not worked around here on
+    /// purpose. Default is headed.
     #[arg(long, global = true)]
     headless: bool,
 
@@ -224,7 +234,7 @@ async fn main() -> Result<()> {
 }
 
 async fn fetch_filtered(
-    page: &chromiumoxide::Page,
+    backend: &backend::Backend,
     filter: &FilterArgs,
     delay_ms: u64,
 ) -> Result<Vec<api::Reply>> {
@@ -244,7 +254,7 @@ async fn fetch_filtered(
             lang: filter.core.lang.clone(),
         };
 
-        let resp = api::fetch_announcements(page, &params).await?;
+        let resp = backend.fetch_announcements(&params).await?;
         eprintln!(
             "Page {page_num}: {} announcements (of {} matching total).",
             resp.replies.len(),
@@ -295,9 +305,9 @@ fn build_download_tasks<'a>(
 }
 
 async fn run_fetch(cli: &Cli, args: &FetchArgs) -> Result<()> {
-    let session = browser::Session::open(&cli.browser_path, cli.headless).await?;
-    let replies = fetch_filtered(&session.page, &args.filter, cli.delay_ms).await?;
-    session.close().await?;
+    let backend = backend::Backend::open(&cli.browser_path, cli.headless, cli.browser).await?;
+    let replies = fetch_filtered(&backend, &args.filter, cli.delay_ms).await?;
+    backend.close().await?;
 
     let json = serde_json::to_string_pretty(&replies)?;
     match &args.output {
@@ -311,23 +321,23 @@ async fn run_fetch(cli: &Cli, args: &FetchArgs) -> Result<()> {
 }
 
 async fn run_download(cli: &Cli, args: &DownloadArgs) -> Result<()> {
-    let session = browser::Session::open(&cli.browser_path, cli.headless).await?;
+    let backend = backend::Backend::open(&cli.browser_path, cli.headless, cli.browser).await?;
 
     let replies = if let Some(path) = &args.from_json {
         let data = std::fs::read_to_string(path)
             .with_context(|| format!("reading {}", path.display()))?;
         serde_json::from_str(&data).context("parsing --from-json file")?
     } else {
-        fetch_filtered(&session.page, &args.filter, cli.delay_ms).await?
+        fetch_filtered(&backend, &args.filter, cli.delay_ms).await?
     };
 
     let tasks = build_download_tasks(&replies, args.main_only);
 
     eprintln!("Downloading {} file(s) to {}...", tasks.len(), args.out_dir.display());
-    let (ok, err) =
-        download::download_all(&session.page, &tasks, &args.out_dir, args.concurrency, cli.delay_ms)
-            .await?;
-    session.close().await?;
+    let (ok, err) = backend
+        .download_all(&tasks, &args.out_dir, args.concurrency, cli.delay_ms)
+        .await?;
+    backend.close().await?;
 
     eprintln!("Done: {ok} succeeded, {err} failed.");
     if err > 0 && ok == 0 {
@@ -356,7 +366,7 @@ fn print_announcement(reply: &api::Reply, as_json: bool) {
 /// downloads whatever wasn't seen before. Stops cleanly on Ctrl+C so the browser
 /// process doesn't get left running.
 async fn run_watch(cli: &Cli, args: &WatchArgs) -> Result<()> {
-    let session = browser::Session::open(&cli.browser_path, cli.headless).await?;
+    let backend = backend::Backend::open(&cli.browser_path, cli.headless, cli.browser).await?;
 
     eprintln!(
         "Watching (window={}, every {}s). Press Ctrl+C to stop.",
@@ -374,18 +384,18 @@ async fn run_watch(cli: &Cli, args: &WatchArgs) -> Result<()> {
                 break;
             }
             _ = interval.tick() => {
-                if let Err(e) = poll_once(&session.page, args, &mut seen, &mut first_poll, cli.delay_ms).await {
+                if let Err(e) = poll_once(&backend, args, &mut seen, &mut first_poll, cli.delay_ms).await {
                     eprintln!("Poll failed: {e:#}. Retrying next interval.");
                 }
             }
         }
     }
 
-    session.close().await
+    backend.close().await
 }
 
 async fn poll_once(
-    page: &chromiumoxide::Page,
+    backend: &backend::Backend,
     args: &WatchArgs,
     seen: &mut HashSet<String>,
     first_poll: &mut bool,
@@ -403,7 +413,7 @@ async fn poll_once(
         lang: args.core.lang.clone(),
     };
 
-    let resp = api::fetch_announcements(page, &params).await?;
+    let resp = backend.fetch_announcements(&params).await?;
 
     if *first_poll {
         for reply in &resp.replies {
@@ -443,8 +453,9 @@ async fn poll_once(
         let tasks = build_download_tasks(new_items.iter().copied(), args.main_only);
         if !tasks.is_empty() {
             eprintln!("Downloading {} new file(s)...", tasks.len());
-            let (ok, err) =
-                download::download_all(page, &tasks, &args.out_dir, args.concurrency, delay_ms).await?;
+            let (ok, err) = backend
+                .download_all(&tasks, &args.out_dir, args.concurrency, delay_ms)
+                .await?;
             eprintln!("  {ok} succeeded, {err} failed.");
         }
     }
