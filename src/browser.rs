@@ -84,3 +84,38 @@ async fn wait_for_clearance(page: &Page) -> Result<()> {
         "disclosure list never appeared after 30s, saved idx_challenge_debug.png for inspection"
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::api;
+
+    // Launches a real browser and waits for Cloudflare's live managed challenge to
+    // clear (~5-15s), then makes a real GetAnnouncement call through it. Requires a
+    // Chromium-based browser locally (override the path with MADDO_TEST_BROWSER_PATH if
+    // it isn't at /usr/bin/brave). Not run by default; verify manually with
+    // `cargo test -- --ignored`.
+    #[tokio::test]
+    #[ignore]
+    async fn opens_a_session_clears_the_challenge_and_fetches_through_it() {
+        let browser_path =
+            std::env::var("MADDO_TEST_BROWSER_PATH").unwrap_or_else(|_| "/usr/bin/brave".to_string());
+        let session = Session::open(&browser_path, false)
+            .await
+            .expect("browser should launch and clear the live Cloudflare challenge");
+
+        let params = api::QueryParams {
+            ticker: Some("BBCA".to_string()),
+            page_size: 1,
+            ..Default::default()
+        };
+        let resp = api::fetch_announcements(&session.page, &params)
+            .await
+            .expect("GetAnnouncement should succeed inside the cleared tab");
+
+        assert!(resp.result_count > 0);
+        assert!(!resp.replies.is_empty());
+
+        session.close().await.unwrap();
+    }
+}

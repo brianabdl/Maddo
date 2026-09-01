@@ -462,3 +462,246 @@ async fn poll_once(
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use api::{AttachmentInfo, Pengumuman, Reply};
+
+    fn reply(id2: &str, tanggal: &str, ticker: &str, attachments: Vec<AttachmentInfo>) -> Reply {
+        Reply {
+            pengumuman: Pengumuman {
+                id2: id2.to_string(),
+                no_pengumuman: "001/X/2026".to_string(),
+                tanggal: tanggal.to_string(),
+                judul: "Judul".to_string(),
+                jenis: "STOCK".to_string(),
+                kode_emiten: ticker.to_string(),
+            },
+            attachments,
+        }
+    }
+
+    fn attachment(filename: &str, is_supporting: bool) -> AttachmentInfo {
+        AttachmentInfo {
+            filename: filename.to_string(),
+            url: format!("https://www.idx.co.id/StaticData/{filename}"),
+            is_supporting,
+        }
+    }
+
+    // -- parse_date / resolve_dates --------------------------------------------------
+
+    #[test]
+    fn parse_date_converts_iso_to_compact_form() {
+        assert_eq!(parse_date("2026-09-01").unwrap(), "20260901");
+    }
+
+    #[test]
+    fn parse_date_rejects_malformed_input() {
+        let err = parse_date("09/01/2026").unwrap_err();
+        assert!(format!("{err:#}").contains("invalid date"));
+    }
+
+    #[test]
+    fn resolve_dates_defaults_to_full_history_through_today() {
+        let core = CoreFilterArgs {
+            date_from: None,
+            date_to: None,
+            ticker: None,
+            keyword: None,
+            security_type: None,
+            lang: "id".to_string(),
+        };
+        let (from, to) = core.resolve_dates().unwrap();
+        assert_eq!(from, "19010101");
+        assert_eq!(to, chrono::Local::now().format("%Y%m%d").to_string());
+    }
+
+    #[test]
+    fn resolve_dates_uses_explicit_bounds_when_given() {
+        let core = CoreFilterArgs {
+            date_from: Some("2026-01-01".to_string()),
+            date_to: Some("2026-09-01".to_string()),
+            ticker: None,
+            keyword: None,
+            security_type: None,
+            lang: "id".to_string(),
+        };
+        let (from, to) = core.resolve_dates().unwrap();
+        assert_eq!(from, "20260101");
+        assert_eq!(to, "20260901");
+    }
+
+    #[test]
+    fn resolve_dates_propagates_a_bad_date_from() {
+        let core = CoreFilterArgs {
+            date_from: Some("not-a-date".to_string()),
+            date_to: None,
+            ticker: None,
+            keyword: None,
+            security_type: None,
+            lang: "id".to_string(),
+        };
+        assert!(core.resolve_dates().is_err());
+    }
+
+    // -- emiten_type --------------------------------------------------------------
+
+    #[test]
+    fn emiten_type_defaults_to_wildcard_when_unset() {
+        let core = CoreFilterArgs {
+            date_from: None,
+            date_to: None,
+            ticker: None,
+            keyword: None,
+            security_type: None,
+            lang: "id".to_string(),
+        };
+        assert_eq!(core.emiten_type(), "*");
+    }
+
+    #[test]
+    fn emiten_type_maps_every_security_type_variant() {
+        let cases = [
+            (SecurityType::Saham, "s"),
+            (SecurityType::Obligasi, "o"),
+            (SecurityType::Etf, "etf"),
+            (SecurityType::DireDinfra, "dd"),
+            (SecurityType::Eba, "eba"),
+        ];
+        for (variant, expected) in cases {
+            let core = CoreFilterArgs {
+                date_from: None,
+                date_to: None,
+                ticker: None,
+                keyword: None,
+                security_type: Some(variant),
+                lang: "id".to_string(),
+            };
+            assert_eq!(core.emiten_type(), expected);
+        }
+    }
+
+    // -- build_download_tasks ------------------------------------------------------
+
+    #[test]
+    fn build_download_tasks_includes_all_attachments_by_default() {
+        let replies = vec![reply(
+            "id1",
+            "2026-09-01T18:02:45",
+            "BBCA",
+            vec![attachment("main.pdf", false), attachment("supporting.pdf", true)],
+        )];
+
+        let tasks = build_download_tasks(&replies, false);
+
+        assert_eq!(tasks.len(), 2);
+    }
+
+    #[test]
+    fn build_download_tasks_main_only_skips_supporting_attachments() {
+        let replies = vec![reply(
+            "id1",
+            "2026-09-01T18:02:45",
+            "BBCA",
+            vec![attachment("main.pdf", false), attachment("supporting.pdf", true)],
+        )];
+
+        let tasks = build_download_tasks(&replies, true);
+
+        assert_eq!(tasks.len(), 1);
+        assert!(tasks[0].dest_filename.contains("main.pdf"));
+    }
+
+    #[test]
+    fn build_download_tasks_compacts_the_date_and_trims_the_ticker() {
+        let replies = vec![reply(
+            "id1",
+            "2026-09-01T18:02:45",
+            "BBCA                                                                                ",
+            vec![attachment("main.pdf", false)],
+        )];
+
+        let tasks = build_download_tasks(&replies, false);
+
+        assert_eq!(tasks[0].dest_filename, "20260901_BBCA_main.pdf");
+    }
+
+    #[test]
+    fn build_download_tasks_accumulates_across_multiple_replies() {
+        let replies = vec![
+            reply("id1", "2026-09-01", "BBCA", vec![attachment("a.pdf", false)]),
+            reply("id2", "2026-08-26", "TPIA", vec![attachment("b.pdf", false), attachment("c.pdf", true)]),
+        ];
+
+        let tasks = build_download_tasks(&replies, false);
+
+        assert_eq!(tasks.len(), 3);
+    }
+
+    #[test]
+    fn build_download_tasks_handles_a_reply_with_no_attachments() {
+        let replies = vec![reply("id1", "2026-09-01", "BBCA", vec![])];
+
+        let tasks = build_download_tasks(&replies, false);
+
+        assert!(tasks.is_empty());
+    }
+
+    // -- CLI parsing ----------------------------------------------------------------
+
+    #[test]
+    fn cli_defaults_match_documented_values() {
+        let cli = Cli::try_parse_from(["maddo", "fetch"]).unwrap();
+        assert!(!cli.browser);
+        assert_eq!(cli.browser_path, "/usr/bin/brave");
+        assert!(!cli.headless);
+        assert_eq!(cli.delay_ms, 800);
+
+        let Command::Fetch(args) = &cli.command else { panic!("expected Fetch") };
+        assert_eq!(args.filter.page, 1);
+        assert_eq!(args.filter.pages, 1);
+        assert_eq!(args.filter.page_size, 10);
+        assert_eq!(args.filter.core.lang, "id");
+    }
+
+    #[test]
+    fn cli_download_and_watch_defaults() {
+        let cli = Cli::try_parse_from(["maddo", "download"]).unwrap();
+        let Command::Download(args) = &cli.command else { panic!("expected Download") };
+        assert_eq!(args.out_dir, PathBuf::from("./downloads"));
+        assert_eq!(args.concurrency, 5);
+        assert!(!args.main_only);
+
+        let cli = Cli::try_parse_from(["maddo", "watch"]).unwrap();
+        let Command::Watch(args) = &cli.command else { panic!("expected Watch") };
+        assert_eq!(args.window, 20);
+        assert_eq!(args.interval_secs, 30);
+        assert!(!args.download);
+        assert!(!args.json);
+    }
+
+    #[test]
+    fn cli_requires_a_subcommand() {
+        assert!(Cli::try_parse_from(["maddo"]).is_err());
+    }
+
+    #[test]
+    fn cli_rejects_an_unknown_security_type() {
+        assert!(Cli::try_parse_from(["maddo", "fetch", "--type", "crypto"]).is_err());
+    }
+
+    #[test]
+    fn cli_parses_a_known_security_type_through_to_emiten_type() {
+        let cli = Cli::try_parse_from(["maddo", "fetch", "--type", "saham"]).unwrap();
+        let Command::Fetch(args) = &cli.command else { panic!("expected Fetch") };
+        assert_eq!(args.filter.core.emiten_type(), "s");
+    }
+
+    #[test]
+    fn cli_global_browser_flag_applies_before_the_subcommand() {
+        let cli = Cli::try_parse_from(["maddo", "--browser", "fetch"]).unwrap();
+        assert!(cli.browser);
+    }
+}

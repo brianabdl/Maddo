@@ -165,6 +165,7 @@ pub fn dest_filename(date_compact: &str, ticker: &str, original: &str) -> String
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::tempdir;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -203,7 +204,7 @@ mod tests {
             .await;
 
         let client = crate::http::HttpClient::new().unwrap();
-        let out_dir = tempdir();
+        let out_dir = tempdir().unwrap();
         let tasks = vec![task(&format!("{}/a.pdf", server.uri()), "a.pdf")];
 
         let (ok, err) = download_all(&client, &tasks, out_dir.path(), 5, 0).await.unwrap();
@@ -223,7 +224,7 @@ mod tests {
             .await;
 
         let client = crate::http::HttpClient::new().unwrap();
-        let out_dir = tempdir();
+        let out_dir = tempdir().unwrap();
         let tasks = vec![task(&format!("{}/missing.pdf", server.uri()), "missing.pdf")];
 
         let (ok, err) = download_all(&client, &tasks, out_dir.path(), 5, 0).await.unwrap();
@@ -247,7 +248,7 @@ mod tests {
             .await;
 
         let client = crate::http::HttpClient::new().unwrap();
-        let out_dir = tempdir();
+        let out_dir = tempdir().unwrap();
         let tasks = vec![
             task(&format!("{}/ok.pdf", server.uri()), "ok.pdf"),
             task(&format!("{}/bad.pdf", server.uri()), "bad.pdf"),
@@ -272,7 +273,7 @@ mod tests {
             .await;
 
         let client = crate::http::HttpClient::new().unwrap();
-        let out_dir = tempdir();
+        let out_dir = tempdir().unwrap();
         let nested = out_dir.path().join("nested").join("dir");
         let tasks = vec![task(&format!("{}/a.pdf", server.uri()), "a.pdf")];
 
@@ -281,29 +282,35 @@ mod tests {
         assert!(nested.join("a.pdf").exists());
     }
 
-    /// Minimal self-cleaning temp dir so tests don't depend on an external crate just
-    /// for this.
-    struct TempDir(std::path::PathBuf);
-    impl TempDir {
-        fn path(&self) -> &std::path::Path {
-            &self.0
-        }
-    }
-    impl Drop for TempDir {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
-        }
-    }
-    fn tempdir() -> TempDir {
-        let dir = std::env::temp_dir().join(format!(
-            "maddo-test-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        TempDir(dir)
+    // Hits the real, Cloudflare-protected StaticData PDF host. Not run by default (would
+    // make `cargo test` flaky/network-dependent in CI); verify manually with
+    // `cargo test -- --ignored`.
+    #[tokio::test]
+    #[ignore]
+    async fn download_all_fetches_a_real_pdf_from_idx() {
+        let client = crate::http::HttpClient::new().unwrap();
+        let params = crate::api::QueryParams {
+            ticker: Some("BBCA".to_string()),
+            page_size: 1,
+            ..Default::default()
+        };
+        let resp = crate::api::fetch_announcements_http(&client, &params)
+            .await
+            .expect("live GetAnnouncement call should succeed");
+        let url = resp.replies[0]
+            .attachments
+            .first()
+            .expect("expected the latest BBCA announcement to have an attachment")
+            .url
+            .clone();
+
+        let out_dir = tempdir().unwrap();
+        let tasks = vec![task(&url, "live.pdf")];
+
+        let (ok, err) = download_all(&client, &tasks, out_dir.path(), 1, 0).await.unwrap();
+
+        assert_eq!((ok, err), (1, 0));
+        let bytes = std::fs::read(out_dir.path().join("live.pdf")).unwrap();
+        assert!(bytes.starts_with(b"%PDF"), "expected real PDF magic bytes");
     }
 }

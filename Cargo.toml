@@ -21,4 +21,5 @@ wreq = { version = "6.0.0-rc.31", features = ["json", "cookies", "query"] }
 wreq-util = "3.0.0-rc.14"
 
 [dev-dependencies]
+tempfile = "3.27.0"
 wiremock = "0.6.5"
