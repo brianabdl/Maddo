@@ -11,7 +11,7 @@ use serde::de::DeserializeOwned;
 use wreq::Client;
 use wreq_util::Emulation;
 
-const REFERER: &str = "https://www.idx.co.id/en/";
+const DEFAULT_REFERER: &str = "https://www.idx.co.id/id/";
 
 #[derive(Clone)]
 pub struct HttpClient(Client);
@@ -27,11 +27,15 @@ impl HttpClient {
     }
 
     pub async fn get_json<T: DeserializeOwned>(&self, url: &str, query: &[(&str, &str)]) -> Result<T> {
+        let referer = match query.iter().find(|(k, _)| *k == "lang") {
+            Some((_, lang)) => format!("https://www.idx.co.id/{lang}/"),
+            None => DEFAULT_REFERER.to_string(),
+        };
         let resp = self
             .0
             .get(url)
             .query(query)
-            .header("Referer", REFERER)
+            .header("Referer", referer)
             .header("Accept", "application/json, text/plain, */*")
             .send()
             .await
@@ -47,7 +51,7 @@ impl HttpClient {
         let resp = self
             .0
             .get(url)
-            .header("Referer", REFERER)
+            .header("Referer", DEFAULT_REFERER)
             .send()
             .await
             .with_context(|| format!("GET {url}"))?;
@@ -96,16 +100,36 @@ mod tests {
             .and(path("/thing"))
             .and(query_param("a", "1"))
             .and(query_param("b", "two words"))
-            .and(header("Referer", REFERER))
+            .and(query_param("lang", "en"))
+            .and(header("Referer", "https://www.idx.co.id/en/"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"ok": true})))
             .mount(&server)
             .await;
 
         let client = HttpClient::new().unwrap();
         let got: Payload = client
-            .get_json(&format!("{}/thing", server.uri()), &[("a", "1"), ("b", "two words")])
+            .get_json(
+                &format!("{}/thing", server.uri()),
+                &[("a", "1"), ("b", "two words"), ("lang", "en")],
+            )
             .await
             .unwrap();
+
+        assert_eq!(got, Payload { ok: true });
+    }
+
+    #[tokio::test]
+    async fn get_json_defaults_referer_to_id_when_no_lang_param() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/thing"))
+            .and(header("Referer", DEFAULT_REFERER))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"ok": true})))
+            .mount(&server)
+            .await;
+
+        let client = HttpClient::new().unwrap();
+        let got: Payload = client.get_json(&format!("{}/thing", server.uri()), &[]).await.unwrap();
 
         assert_eq!(got, Payload { ok: true });
     }
