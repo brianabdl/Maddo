@@ -1,8 +1,9 @@
 // Minimal HTTP server behind the `live` subcommand: serves a small single-page UI and
 // proxies its two API calls through whichever `Backend` the run picked. Deliberately
 // hand-rolled on `tokio::net::TcpListener` rather than pulling in a web framework:
-// there are exactly three routes, all GET, no bodies to parse, and it only ever binds
-// to loopback.
+// there are exactly three routes, all GET, and no bodies to parse. The bind address
+// comes from `--host` and defaults to loopback; anything wider is the caller's call
+// (the container image sets 0.0.0.0 and relies on the published port mapping).
 //
 // The file route is a proxy, not an open relay: it refuses any URL outside
 // `https://www.idx.co.id/`, so the page can't be used to fetch arbitrary hosts through

@@ -22,7 +22,7 @@ use api::QueryParams;
 use chrono::NaiveDate;
 use clap::{Args, Parser, Subcommand};
 use std::collections::HashSet;
-use std::net::SocketAddr;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -229,9 +229,16 @@ struct WatchArgs {
 
 #[derive(Args)]
 struct LiveArgs {
-    /// Port to serve the UI on. Always bound to loopback (127.0.0.1) only.
+    /// Port to serve the UI on.
     #[arg(long, default_value_t = 8080)]
     port: u16,
+
+    /// Address to bind the UI to. Defaults to loopback, so the server is reachable only
+    /// from this machine. Set it to 0.0.0.0 only where something else (a container port
+    /// mapping, a firewall) controls who can reach it: the UI has no authentication and
+    /// proxies requests through the impersonating client.
+    #[arg(long, default_value_t = IpAddr::V4(Ipv4Addr::LOCALHOST))]
+    host: IpAddr,
 }
 
 #[tokio::main]
@@ -363,7 +370,7 @@ async fn run_download(cli: &Cli, args: &DownloadArgs) -> Result<()> {
 /// it runs goes through the same `Backend` as the other subcommands.
 async fn run_live(cli: &Cli, args: &LiveArgs) -> Result<()> {
     let backend = Arc::new(backend::Backend::open(&cli.browser_path, cli.headless, cli.browser).await?);
-    let addr = SocketAddr::from(([127, 0, 0, 1], args.port));
+    let addr = SocketAddr::new(args.host, args.port);
 
     tokio::select! {
         _ = tokio::signal::ctrl_c() => eprintln!("\nStopping server..."),
@@ -738,6 +745,20 @@ mod tests {
         let cli = Cli::try_parse_from(["maddo", "live", "--port", "9000"]).unwrap();
         let Command::Live(args) = &cli.command else { panic!("expected Live") };
         assert_eq!(args.port, 9000);
+    }
+
+    #[test]
+    fn cli_live_defaults_to_binding_loopback() {
+        let cli = Cli::try_parse_from(["maddo", "live"]).unwrap();
+        let Command::Live(args) = &cli.command else { panic!("expected Live") };
+        assert_eq!(args.host, IpAddr::V4(Ipv4Addr::LOCALHOST));
+    }
+
+    #[test]
+    fn cli_live_accepts_an_explicit_host() {
+        let cli = Cli::try_parse_from(["maddo", "live", "--host", "0.0.0.0"]).unwrap();
+        let Command::Live(args) = &cli.command else { panic!("expected Live") };
+        assert_eq!(args.host, IpAddr::V4(Ipv4Addr::UNSPECIFIED));
     }
 
     #[test]

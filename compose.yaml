@@ -1,0 +1,23 @@
+services:
+  maddo:
+    build: .
+    image: maddo:latest
+    container_name: maddo-live
+    restart: unless-stopped
+    # The UI has no authentication and proxies through the impersonating client,
+    # so publish it on the host's loopback only. Change to "8080:8080" only if
+    # something in front of it (reverse proxy, firewall) controls access.
+    ports:
+      - "127.0.0.1:8080:8080"
+    command: ["live", "--host", "0.0.0.0", "--port", "8080"]
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "-o", "/dev/null", "http://127.0.0.1:8080/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s

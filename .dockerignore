@@ -1,0 +1,8 @@
+target/
+.git/
+.github/
+.claude/
+*.png
+Dockerfile
+compose.yaml
+.dockerignore
