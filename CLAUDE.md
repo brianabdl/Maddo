@@ -151,7 +151,7 @@ authenticates as anyone or reaches non-public data.
 
 - **`src/server.rs`**: the `live` subcommand's web server. Hand-rolled on
   `tokio::net::TcpListener` instead of pulling in a web framework: three GET
-  routes, no request bodies, loopback-only bind. `/` serves
+  routes, no request bodies. `/` serves
   `src/ui/index.html` (embedded via `include_str!`), `/api/announcements`
   maps the page's query string onto `QueryParams` and returns
   `Backend::fetch_announcements`'s replies as JSON, and `/api/file` streams
@@ -161,7 +161,10 @@ authenticates as anyone or reaches non-public data.
   to reach arbitrary hosts. `run_live` shares one `Backend` across
   connection handlers as an `Arc`, then reclaims sole ownership (retrying
   for up to ~2s) before `close()`, since a `--browser` session must be shut
-  down explicitly and connection tasks hold their own clones.
+  down explicitly and connection tasks hold their own clones. The bind
+  address is `live --host` (default `127.0.0.1`); `Dockerfile`/`compose.yaml`
+  run it with `--host 0.0.0.0` and publish the port on the host's loopback
+  only, since the UI itself has no authentication.
 
 Data flow for a single `fetch`/`download` call is straightforward:
 `Backend::open` → `fetch_filtered` (loops pages, calls
