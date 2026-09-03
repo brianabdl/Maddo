@@ -102,9 +102,34 @@ matching history as "new". Every poll after that reports (and, with
 stop; with `--browser`, the browser process is shut down cleanly rather
 than left running.
 
+### `live`: local web UI
+
+Serves a small single-page UI on loopback so you can browse the same feed in
+a browser instead of the terminal.
+
+```sh
+maddo live
+maddo live --port 9000
+```
+
+Open the printed URL (default <http://127.0.0.1:8080>). The page has the
+same filters as the CLI (ticker, keyword, security type, date range, page
+size, language), prev/next pagination, an optional 30-second auto-refresh,
+and links that open each attachment PDF. Filters live in the page, so
+`live` takes no filter flags of its own, only `--port`.
+
+The server is loopback-only and has three routes: `/` (the UI),
+`/api/announcements` (the same `GetAnnouncement` call the other subcommands
+make, through the active transport), and `/api/file` (a proxy that streams
+one attachment back to the page). The file proxy refuses any URL outside
+`https://www.idx.co.id/`, so the page can't use it to fetch arbitrary hosts.
+Press `Ctrl+C` to stop; with `--browser`, the browser process is shut down
+cleanly.
+
 ## Filtering options
 
-All three commands share the same filter flags:
+`fetch`, `download`, and `watch` share the same filter flags (`live` sets
+them in the UI instead):
 
 | Flag | Description |
 | --- | --- |
@@ -139,6 +164,8 @@ src/
   browser.rs   --browser fallback: browser session lifecycle over CDP, wait past the Cloudflare challenge
   api.rs       Typed client for IDX's internal GetAnnouncement API (both transports)
   download.rs  Batched file downloads (both transports)
+  server.rs    `live` subcommand: minimal loopback HTTP server for the web UI
+  ui/index.html  The single-page UI served by `live` (embedded at compile time)
 ```
 
 ## Data source and scope

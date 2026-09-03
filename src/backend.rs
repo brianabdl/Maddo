@@ -48,6 +48,14 @@ impl Backend {
         }
     }
 
+    /// Fetches a single URL's raw bytes (the `live` server's file proxy).
+    pub async fn get_bytes(&self, url: &str) -> Result<Vec<u8>> {
+        match self {
+            Backend::Http(client) => client.get_bytes(url).await,
+            Backend::Browser(session) => download::fetch_bytes_browser(&session.page, url).await,
+        }
+    }
+
     pub async fn close(self) -> Result<()> {
         match self {
             Backend::Http(_) => Ok(()),

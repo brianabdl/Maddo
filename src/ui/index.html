@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Maddo: IDX disclosures</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font: 14px/1.45 system-ui, sans-serif; margin: 0; padding: 1rem; }
+  h1 { font-size: 1.1rem; margin: 0 0 .75rem; }
+  form { display: flex; flex-wrap: wrap; gap: .5rem; align-items: flex-end; margin-bottom: .75rem; }
+  label { display: flex; flex-direction: column; font-size: .75rem; opacity: .8; gap: .15rem; }
+  input, select, button { font: inherit; padding: .3rem .4rem; }
+  input[type=text] { width: 9rem; }
+  #status { font-size: .8rem; opacity: .75; margin-bottom: .5rem; }
+  table { border-collapse: collapse; width: 100%; }
+  th, td { text-align: left; padding: .35rem .5rem; border-bottom: 1px solid #8883; vertical-align: top; }
+  th { font-size: .75rem; text-transform: uppercase; opacity: .7; }
+  td.date { white-space: nowrap; }
+  td.ticker { font-weight: 600; white-space: nowrap; }
+  a { color: inherit; }
+  .files a { margin-right: .5rem; white-space: nowrap; }
+  .pager { display: flex; gap: .5rem; align-items: center; margin-top: .75rem; }
+</style>
+</head>
+<body>
+<h1>Maddo</h1>
+
+<form id="filters">
+  <label>Ticker<input type="text" name="ticker" placeholder="BBCA"></label>
+  <label>Keyword<input type="text" name="keyword" placeholder="dividen"></label>
+  <label>Type
+    <select name="type">
+      <option value="*">All</option>
+      <option value="s">Saham</option>
+      <option value="o">Obligasi &amp; Sukuk</option>
+      <option value="etf">ETF</option>
+      <option value="dd">Dire &amp; Dinfra</option>
+      <option value="eba">EBA</option>
+    </select>
+  </label>
+  <label>From<input type="date" name="dateFrom"></label>
+  <label>To<input type="date" name="dateTo"></label>
+  <label>Per page<input type="number" name="pageSize" value="10" min="1" max="100" style="width:4.5rem"></label>
+  <label>Lang
+    <select name="lang"><option value="id">id</option><option value="en">en</option></select>
+  </label>
+  <button type="submit">Search</button>
+  <label style="flex-direction:row; align-items:center; gap:.3rem">
+    <input type="checkbox" id="auto"> auto-refresh 30s
+  </label>
+</form>
+
+<div id="status">Ready.</div>
+<table>
+  <thead><tr><th>Date</th><th>Ticker</th><th>Title</th><th>Files</th></tr></thead>
+  <tbody id="rows"></tbody>
+</table>
+
+<div class="pager">
+  <button id="prev">&larr; Prev</button>
+  <span id="pageLabel">Page 1</span>
+  <button id="next">Next &rarr;</button>
+</div>
+
+<script>
+const form = document.getElementById('filters');
+const rows = document.getElementById('rows');
+const status = document.getElementById('status');
+const pageLabel = document.getElementById('pageLabel');
+let page = 1;
+let timer = null;
+
+function query() {
+  const params = new URLSearchParams(new FormData(form));
+  params.set('page', page);
+  return params.toString();
+}
+
+async function load() {
+  status.textContent = 'Loading...';
+  try {
+    const res = await fetch('/api/announcements?' + query());
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || ('HTTP ' + res.status));
+    render(data);
+  } catch (e) {
+    status.textContent = 'Failed: ' + e.message;
+  }
+}
+
+function render(data) {
+  rows.replaceChildren();
+  for (const reply of data.replies) {
+    const p = reply.pengumuman;
+    const tr = document.createElement('tr');
+    tr.append(
+      cell('date', (p.TglPengumuman || '').replace('T', ' ').slice(0, 16)),
+      cell('ticker', (p.Kode_Emiten || '').trim()),
+      cell('title', p.JudulPengumuman || ''),
+      files(reply.attachments || [])
+    );
+    rows.append(tr);
+  }
+  pageLabel.textContent = 'Page ' + data.page;
+  status.textContent = data.resultCount + ' matching announcement(s). Updated ' +
+    new Date().toLocaleTimeString() + '.';
+}
+
+function cell(cls, text) {
+  const td = document.createElement('td');
+  td.className = cls;
+  td.textContent = text;
+  return td;
+}
+
+function files(attachments) {
+  const td = document.createElement('td');
+  td.className = 'files';
+  attachments.forEach((att, i) => {
+    const a = document.createElement('a');
+    a.href = '/api/file?url=' + encodeURIComponent(att.FullSavePath);
+    a.target = '_blank';
+    a.rel = 'noopener';
+    a.textContent = att.IsAttachment ? 'attachment ' + i : 'document';
+    td.append(a);
+  });
+  return td;
+}
+
+form.addEventListener('submit', (e) => { e.preventDefault(); page = 1; load(); });
+document.getElementById('prev').addEventListener('click', () => {
+  if (page > 1) { page--; load(); }
+});
+document.getElementById('next').addEventListener('click', () => { page++; load(); });
+document.getElementById('auto').addEventListener('change', (e) => {
+  clearInterval(timer);
+  timer = e.target.checked ? setInterval(load, 30000) : null;
+});
+
+load();
+</script>
+</body>
+</html>

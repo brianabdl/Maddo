@@ -2,6 +2,13 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Writing rules
+
+Every file in `.claude/rules/` is a rule for how to write text in this
+repo. Read all of them before writing prose, comments, commit messages, or
+docs, and follow them. New rules get added there over time, so re-read the
+folder rather than relying on what you remember.
+
 ## What this is
 
 Maddo is a Rust CLI (binary name `maddo`) that fetches, watches, and
@@ -60,7 +67,8 @@ sit behind Cloudflare. As of this revision:
   both hosts with no prior browser session and no cookie priming (verified
   live against both endpoints on 2026-09-01).
 
-So the default path for all three subcommands (`fetch`, `download`, `watch`)
+So the default path for every subcommand (`fetch`, `download`, `watch`,
+`live`)
 is now `src/http.rs`'s `HttpClient`, no browser process involved. `--browser`
 remains as an opt-in fallback through the original chromiumoxide/CDP path,
 for if/when IDX's Cloudflare rules tighten enough to block `wreq`'s
@@ -118,8 +126,8 @@ authenticates as anyone or reaches non-public data.
   inside one `page.evaluate()` call per batch. Both variants sleep
   `--delay-ms` between batches.
 
-- **`src/main.rs`** — CLI surface (`clap`) and orchestration. Three
-  subcommands (`fetch`, `download`, `watch`) share `CoreFilterArgs`
+- **`src/main.rs`** — CLI surface (`clap`) and orchestration. Four
+  subcommands; `fetch`, `download`, and `watch` share `CoreFilterArgs`
   (ticker/keyword/type/date range/lang); `fetch` and `download` additionally
   take `FilterArgs` (adds page/pages/page_size) for one-shot paginated
   queries via `fetch_filtered()`. `watch` instead polls the API on a timer
@@ -140,6 +148,20 @@ authenticates as anyone or reaches non-public data.
     against the poll interval, specifically so `Backend::close()` still
     runs on Ctrl+C and no browser process (when `--browser` is active) is
     left orphaned.
+
+- **`src/server.rs`**: the `live` subcommand's web server. Hand-rolled on
+  `tokio::net::TcpListener` instead of pulling in a web framework: three GET
+  routes, no request bodies, loopback-only bind. `/` serves
+  `src/ui/index.html` (embedded via `include_str!`), `/api/announcements`
+  maps the page's query string onto `QueryParams` and returns
+  `Backend::fetch_announcements`'s replies as JSON, and `/api/file` streams
+  one attachment back via `Backend::get_bytes`. That last route is a proxy,
+  not an open relay: it rejects any URL not starting with
+  `https://www.idx.co.id/`, so the page cannot use the impersonating client
+  to reach arbitrary hosts. `run_live` shares one `Backend` across
+  connection handlers as an `Arc`, then reclaims sole ownership (retrying
+  for up to ~2s) before `close()`, since a `--browser` session must be shut
+  down explicitly and connection tasks hold their own clones.
 
 Data flow for a single `fetch`/`download` call is straightforward:
 `Backend::open` → `fetch_filtered` (loops pages, calls

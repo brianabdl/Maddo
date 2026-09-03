@@ -15,13 +15,16 @@ mod backend;
 mod browser;
 mod download;
 mod http;
+mod server;
 
 use anyhow::{Context, Result};
 use api::QueryParams;
 use chrono::NaiveDate;
 use clap::{Args, Parser, Subcommand};
 use std::collections::HashSet;
+use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 /// Maddo: fetch, watch, and download IDX listed-company disclosures.
@@ -61,6 +64,8 @@ enum Command {
     Download(DownloadArgs),
     /// Poll for newly published announcements and print (and optionally download) them as they land.
     Watch(WatchArgs),
+    /// Serve a small local web UI for browsing announcements in a browser.
+    Live(LiveArgs),
 }
 
 #[derive(Debug, Clone, Copy, clap::ValueEnum)]
@@ -222,6 +227,13 @@ struct WatchArgs {
     json: bool,
 }
 
+#[derive(Args)]
+struct LiveArgs {
+    /// Port to serve the UI on. Always bound to loopback (127.0.0.1) only.
+    #[arg(long, default_value_t = 8080)]
+    port: u16,
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -230,6 +242,7 @@ async fn main() -> Result<()> {
         Command::Fetch(args) => run_fetch(&cli, args).await,
         Command::Download(args) => run_download(&cli, args).await,
         Command::Watch(args) => run_watch(&cli, args).await,
+        Command::Live(args) => run_live(&cli, args).await,
     }
 }
 
@@ -343,6 +356,37 @@ async fn run_download(cli: &Cli, args: &DownloadArgs) -> Result<()> {
     if err > 0 && ok == 0 {
         anyhow::bail!("all downloads failed");
     }
+    Ok(())
+}
+
+/// Serves the local web UI until Ctrl+C. Filters live in the page itself; each search
+/// it runs goes through the same `Backend` as the other subcommands.
+async fn run_live(cli: &Cli, args: &LiveArgs) -> Result<()> {
+    let backend = Arc::new(backend::Backend::open(&cli.browser_path, cli.headless, cli.browser).await?);
+    let addr = SocketAddr::from(([127, 0, 0, 1], args.port));
+
+    tokio::select! {
+        _ = tokio::signal::ctrl_c() => eprintln!("\nStopping server..."),
+        res = server::serve(Arc::clone(&backend), addr) => res?,
+    }
+
+    close_shared_backend(backend).await
+}
+
+/// Connection handlers hold their own `Arc` clone, so reclaim sole ownership before
+/// closing (a `--browser` session must be shut down explicitly). Gives in-flight
+/// requests up to ~2s to finish rather than blocking shutdown on a stuck one.
+async fn close_shared_backend(mut backend: Arc<backend::Backend>) -> Result<()> {
+    for _ in 0..40 {
+        match Arc::try_unwrap(backend) {
+            Ok(b) => return b.close().await,
+            Err(shared) => {
+                backend = shared;
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        }
+    }
+    eprintln!("Requests still in flight after 2s; exiting without a clean backend close.");
     Ok(())
 }
 
@@ -680,6 +724,20 @@ mod tests {
         assert_eq!(args.interval_secs, 30);
         assert!(!args.download);
         assert!(!args.json);
+    }
+
+    #[test]
+    fn cli_live_defaults_to_port_8080() {
+        let cli = Cli::try_parse_from(["maddo", "live"]).unwrap();
+        let Command::Live(args) = &cli.command else { panic!("expected Live") };
+        assert_eq!(args.port, 8080);
+    }
+
+    #[test]
+    fn cli_live_accepts_an_explicit_port() {
+        let cli = Cli::try_parse_from(["maddo", "live", "--port", "9000"]).unwrap();
+        let Command::Live(args) = &cli.command else { panic!("expected Live") };
+        assert_eq!(args.port, 9000);
     }
 
     #[test]

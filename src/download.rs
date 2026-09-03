@@ -125,6 +125,23 @@ pub async fn download_all_browser(
     Ok((ok_count, err_count))
 }
 
+/// Fetches one URL's bytes through the browser tab without writing them to disk:
+/// what the `live` server's file proxy needs when the `--browser` transport is active.
+pub async fn fetch_bytes_browser(page: &Page, url: &str) -> Result<Vec<u8>> {
+    let result = fetch_batch(page, &[url])
+        .await?
+        .into_iter()
+        .next()
+        .context("no result returned")?;
+    if let Some(err) = result.error {
+        anyhow::bail!("fetching {url}: {err}");
+    }
+    let b64 = result.base64.context("empty response")?;
+    base64::engine::general_purpose::STANDARD
+        .decode(b64)
+        .context("decoding base64 payload")
+}
+
 async fn fetch_batch(page: &Page, urls: &[&str]) -> Result<Vec<RawResult>> {
     let urls_json = serde_json::to_string(urls)?;
     let js = format!(
