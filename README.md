@@ -35,53 +35,7 @@ cargo build --release
 ./target/release/maddo fetch --ticker BBCA --pages 1
 ```
 
-## Features
-
-- **`fetch`**: list matching announcements as JSON.
-- **`download`**: fetch and save attachment files (PDF, XLSX, XBRL) to disk,
-  filenames prefixed with date and ticker.
-- **`watch`**: poll the feed on an interval and report only what's new since
-  the last poll, optionally downloading it too.
-- **`live`**: a small local web UI with the same filters, pagination, and
-  auto-refresh, for browsing the feed without a terminal.
-
 ## Usage
-
-```sh
-# List announcements
-maddo fetch --ticker TPIA --date-from 2026-08-01 --date-to 2026-09-01 --pages 3
-maddo fetch --keyword "laporan keuangan" --page-size 20
-
-# Download attachments
-maddo download --ticker BBCA --date-from 2026-09-01 --main-only --out-dir ./pdfs
-maddo download --from-json out.json --out-dir ./pdfs   # skip fetching, reuse a saved result
-
-# Watch live
-maddo watch --ticker BBCA --interval-secs 15 --download --out-dir ./live
-
-# Web UI
-maddo live --port 9000
-```
-
-All of `fetch`, `download`, and `watch` share the same filters:
-
-| Flag | Description |
-| --- | --- |
-| `--ticker <CODE>` | Stock ticker, e.g. `TPIA`, `BBCA`. Default: all. |
-| `--keyword <TEXT>` | Free-text search across announcement titles. |
-| `--type <TYPE>` | Security type: `saham`, `obligasi`, `etf`, `dire-dinfra`, `eba`. |
-| `--date-from` / `--date-to <YYYY-MM-DD>` | Date range. Defaults: no lower bound, today. |
-| `--lang <id\|en>` | API response language. Default: `id`. |
-
-`fetch` and `download` add `--page`, `--pages`, `--page-size` for
-pagination. `watch` uses `--window` instead, since it always looks at the
-current head of the feed. `watch`'s first poll only establishes a baseline;
-it won't dump IDX's entire history as "new" on startup.
-
-Global flags: `--browser` (use the Chromium fallback instead of the default
-transport), `--browser-path` (default `/usr/bin/brave`), `--headless`
-(browser fallback only, and not supported by Cloudflare here in practice),
-and `--delay-ms` (pacing between batched requests, default `800`).
 
 Run `maddo --help` or `maddo <command> --help` for the full list.
 
