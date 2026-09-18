@@ -66,6 +66,24 @@ sit behind Cloudflare. As of this revision:
   Chrome cipher/extension ordering) gets `200 OK` JSON/PDF responses from
   both hosts with no prior browser session and no cookie priming (verified
   live against both endpoints on 2026-09-01).
+- Which single fingerprint clears Cloudflare isn't stable over time or
+  across runs: a profile that works one run can get `403` the next, and
+  vice versa, without any code change. So `HttpClient::autodetect()`
+  (`src/http.rs`) keeps a persisted pool of fingerprints last known to work,
+  at `~/.cache/maddo/emulation_pool.json` (or under `$XDG_CACHE_HOME` if
+  set): each run tries the pool's first entry against the real
+  `GetAnnouncement` endpoint, prunes it (and persists the prune) if
+  Cloudflare rejects it, and moves to the next. Once the pool has shrunk to
+  zero or one entries, it's rebuilt by scanning known browser `Profile`
+  variants (everything in `wreq_util::Profile::VARIANTS` except the
+  non-browser OkHttp family, currently 133 fingerprints), stopping once
+  `MAX_POOL_SIZE` (5) working ones are found, before trying resumes. A warm
+  run typically only needs its first probe to succeed; a cold run, or a run
+  where the whole pool has gone stale, pays for a scan up to that cap (or
+  all 133, if fewer than 5 currently work at all). `HttpClient::new()` still
+  builds a fixed `Chrome149` client with no
+  network call and no pool file, kept only for tests that point at a mock
+  server and don't need live probing.
 
 So the default path for every subcommand (`fetch`, `download`, `watch`,
 `live`)
@@ -81,11 +99,20 @@ authenticates as anyone or reaches non-public data.
 `src/backend.rs` defines `Backend`, an enum over the two transports, so
 `main.rs` and the subcommand handlers never branch on which one is active:
 
-- `Backend::Http(HttpClient)` — default. `src/http.rs`'s `HttpClient` wraps
-  a `wreq::Client` built with `.emulation(Emulation::Chrome149)` and
-  `.cookie_store(true)`. `get_json` and `get_bytes` are the only two
-  operations; both set `Referer: https://www.idx.co.id/en/` to match what a
-  real page load would send.
+- `Backend::Http(HttpClient)` — default. `Backend::open` builds it via
+  `HttpClient::autodetect()`, which works through a persisted pool of
+  fingerprints against the real `GetAnnouncement` endpoint and keeps the
+  first `wreq::Client` (`.cookie_store(true)`) that gets past Cloudflare;
+  see "IDX API transport" above. Every outbound request, including
+  `autodetect`'s own probes, goes through `HttpClient::send`, which paces
+  requests at least `MIN_REQUEST_INTERVAL` (300ms) apart across all clones
+  of a client (so a concurrent `download` batch and `full_scan`'s ~130
+  probes don't outrun IDX's rate limit) and retries a `429 Too Many
+  Requests` up to `MAX_429_RETRIES` (5) times, honoring `Retry-After` when
+  IDX sends one and backing off exponentially otherwise. `get_json` and
+  `get_bytes` are the only two public request operations; both set
+  `Referer: https://www.idx.co.id/en/` to match what a real page load would
+  send.
 
 - `Backend::Browser(browser::Session)` — the `--browser` fallback.
   `src/browser.rs`'s `Session::open()` launches a real, unmodified

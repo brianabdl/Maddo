@@ -20,7 +20,7 @@ impl Backend {
             let session = browser::Session::open(browser_path, headless).await?;
             Ok(Backend::Browser(session))
         } else {
-            Ok(Backend::Http(HttpClient::new()?))
+            Ok(Backend::Http(HttpClient::autodetect().await?))
         }
     }
 

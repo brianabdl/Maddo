@@ -213,6 +213,7 @@ fn percent_decode(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::http::HttpClient;
 
     #[test]
     fn parse_query_splits_pairs_and_decodes_values() {
@@ -261,7 +262,7 @@ mod tests {
 
     #[tokio::test]
     async fn file_route_refuses_a_non_idx_url() {
-        let backend = Backend::open("", false, false).await.unwrap();
+        let backend = Backend::Http(HttpClient::new().unwrap());
         let query = parse_query("url=https%3A%2F%2Fevil.example%2Fx.pdf");
 
         let err = file(&backend, &query).await.expect_err("must refuse foreign hosts");
@@ -271,7 +272,7 @@ mod tests {
 
     #[tokio::test]
     async fn file_route_requires_a_url_parameter() {
-        let backend = Backend::open("", false, false).await.unwrap();
+        let backend = Backend::Http(HttpClient::new().unwrap());
         let err = file(&backend, &[]).await.expect_err("missing url must error");
         assert!(format!("{err:#}").contains("missing url"));
     }
