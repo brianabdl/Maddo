@@ -12,6 +12,7 @@ use serde::Deserialize;
 use std::path::Path;
 use std::time::Duration;
 
+use crate::api::Reply;
 use crate::http::HttpClient;
 
 pub struct DownloadTask {
@@ -173,35 +174,142 @@ async fn fetch_batch(page: &Page, urls: &[&str]) -> Result<Vec<RawResult>> {
         .context("parsing batch download result")
 }
 
-/// Sanitizes an announcement into a filesystem-safe, collision-resistant filename.
-pub fn dest_filename(date_compact: &str, ticker: &str, original: &str) -> String {
-    let safe = |s: &str| s.chars().map(|c| if c == '/' || c == '\\' { '_' } else { c }).collect::<String>();
-    format!("{}_{}_{}", date_compact, safe(ticker), safe(original))
+const MAX_TITLE_CHARS: usize = 100;
+
+/// Makes `s` safe to use as (part of) a filename: whitespace runs collapse to one space,
+/// characters that are reserved on common filesystems (or would break a
+/// `Content-Disposition` header) become `_`, and the result is cut to `max_chars` and
+/// stripped of leading/trailing spaces and dots.
+pub fn sanitize_filename(s: &str, max_chars: usize) -> String {
+    let collapsed = s.split_whitespace().collect::<Vec<_>>().join(" ");
+    let safe: String = collapsed
+        .chars()
+        .map(|c| if c.is_control() || "/\\:*?\"<>|".contains(c) { '_' } else { c })
+        .take(max_chars)
+        .collect();
+    safe.trim_matches(|c| c == ' ' || c == '.').to_string()
+}
+
+/// Readable filenames for every attachment of `reply`, in order. IDX's own filenames are
+/// opaque hashes (`e45bf0b681_5f51678b83.pdf`), so the announcement title carries the
+/// meaning: `<date>_<ticker>_<title>.<ext>`. A second main document gets `_2`, and each
+/// supporting attachment gets `_attachment<N>`. Numbering runs over the whole reply, so a
+/// name doesn't change when `--main-only` filters some attachments out.
+pub fn attachment_filenames(reply: &Reply) -> Vec<String> {
+    let p = &reply.pengumuman;
+    let date: String = p.tanggal.chars().take(10).filter(char::is_ascii_digit).collect();
+    let title = sanitize_filename(&p.judul, MAX_TITLE_CHARS);
+
+    let (mut mains, mut supporting) = (0, 0);
+    reply
+        .attachments
+        .iter()
+        .map(|att| {
+            let ext = Path::new(&att.filename)
+                .extension()
+                .and_then(|e| e.to_str())
+                .map(|e| sanitize_filename(e, 10))
+                .filter(|e| !e.is_empty())
+                .unwrap_or_else(|| "pdf".to_string());
+            let title = if title.is_empty() {
+                let stem = Path::new(&att.filename).file_stem().and_then(|s| s.to_str());
+                sanitize_filename(stem.unwrap_or_default(), MAX_TITLE_CHARS)
+            } else {
+                title.clone()
+            };
+            let suffix = if att.is_supporting {
+                supporting += 1;
+                format!("_attachment{supporting}")
+            } else {
+                mains += 1;
+                if mains == 1 { String::new() } else { format!("_{mains}") }
+            };
+            format!("{date}_{}_{title}{suffix}.{ext}", sanitize_filename(p.ticker(), 20))
+        })
+        .collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::api::{AttachmentInfo, Pengumuman};
     use tempfile::tempdir;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
+    fn reply(judul: &str, attachments: Vec<(&str, bool)>) -> Reply {
+        Reply {
+            pengumuman: Pengumuman {
+                id2: "id1".to_string(),
+                no_pengumuman: "001/X/2026".to_string(),
+                tanggal: "2026-09-01T18:02:45".to_string(),
+                judul: judul.to_string(),
+                jenis: "STOCK".to_string(),
+                kode_emiten: "BBCA    ".to_string(),
+            },
+            attachments: attachments
+                .into_iter()
+                .map(|(filename, is_supporting)| AttachmentInfo {
+                    filename: filename.to_string(),
+                    url: format!("https://www.idx.co.id/StaticData/{filename}"),
+                    is_supporting,
+                })
+                .collect(),
+        }
+    }
+
     #[test]
-    fn dest_filename_joins_date_ticker_and_original_name() {
+    fn attachment_filenames_use_date_ticker_and_title_not_the_hash() {
+        let r = reply("Laporan Hasil Public Expose - Tahunan", vec![("e45bf0b681_5f51678b83.pdf", false)]);
         assert_eq!(
-            dest_filename("20260901", "BBCA", "report.pdf"),
-            "20260901_BBCA_report.pdf"
+            attachment_filenames(&r),
+            ["20260901_BBCA_Laporan Hasil Public Expose - Tahunan.pdf"]
         );
     }
 
     #[test]
-    fn dest_filename_sanitizes_slashes_in_ticker_and_original_name() {
-        // Neither field should normally contain a path separator, but if IDX ever sends
-        // one, it must not escape `out_dir`.
-        assert_eq!(
-            dest_filename("20260901", "AB/CD", "na\\me/x.pdf"),
-            "20260901_AB_CD_na_me_x.pdf"
+    fn attachment_filenames_number_extra_documents_and_supporting_files() {
+        let r = reply(
+            "Judul",
+            vec![("a.pdf", false), ("b.pdf", true), ("c.pdf", false), ("d.pdf", true)],
         );
+        assert_eq!(
+            attachment_filenames(&r),
+            [
+                "20260901_BBCA_Judul.pdf",
+                "20260901_BBCA_Judul_attachment1.pdf",
+                "20260901_BBCA_Judul_2.pdf",
+                "20260901_BBCA_Judul_attachment2.pdf",
+            ]
+        );
+    }
+
+    #[test]
+    fn attachment_filenames_keep_the_original_extension_and_default_to_pdf() {
+        let r = reply("Judul", vec![("a.XLSX", true), ("noext", true)]);
+        assert_eq!(
+            attachment_filenames(&r),
+            ["20260901_BBCA_Judul_attachment1.XLSX", "20260901_BBCA_Judul_attachment2.pdf"]
+        );
+    }
+
+    #[test]
+    fn attachment_filenames_fall_back_to_the_original_stem_for_a_blank_title() {
+        let r = reply("  ", vec![("e45bf0b681_5f51678b83.pdf", false)]);
+        assert_eq!(attachment_filenames(&r), ["20260901_BBCA_e45bf0b681_5f51678b83.pdf"]);
+    }
+
+    #[test]
+    fn sanitize_filename_replaces_reserved_characters_and_collapses_whitespace() {
+        assert_eq!(sanitize_filename("A/B\\C: D?  \"E\"\n<F>|", 100), "A_B_C_ D_ _E_ _F__");
+    }
+
+    #[test]
+    fn sanitize_filename_truncates_and_trims_dots_and_spaces() {
+        assert_eq!(sanitize_filename("abcdefgh", 4), "abcd");
+        assert_eq!(sanitize_filename("abc def", 4), "abc");
+        assert_eq!(sanitize_filename(" ..name.. ", 100), "name");
+        assert_eq!(sanitize_filename("../../etc", 100), "_.._etc");
     }
 
     fn task(url: &str, dest_filename: &str) -> DownloadTask {

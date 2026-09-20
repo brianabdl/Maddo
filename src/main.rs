@@ -300,28 +300,36 @@ fn build_download_tasks<'a>(
     replies: impl IntoIterator<Item = &'a api::Reply>,
     main_only: bool,
 ) -> Vec<download::DownloadTask> {
-    let mut tasks = Vec::new();
+    let mut tasks: Vec<download::DownloadTask> = Vec::new();
+    let mut taken = HashSet::new();
     for reply in replies {
-        let date_compact: String = reply
-            .pengumuman
-            .tanggal
-            .chars()
-            .take(10)
-            .filter(|c| c.is_ascii_digit())
-            .collect();
-        let ticker = reply.pengumuman.ticker();
-
-        for att in &reply.attachments {
+        let names = download::attachment_filenames(reply);
+        for (att, name) in reply.attachments.iter().zip(names) {
             if main_only && att.is_supporting {
                 continue;
             }
             tasks.push(download::DownloadTask {
                 url: att.url.clone(),
-                dest_filename: download::dest_filename(&date_compact, ticker, &att.filename),
+                dest_filename: unique_filename(name, &mut taken),
             });
         }
     }
     tasks
+}
+
+/// Two announcements can share a date, ticker, and title; the second must not overwrite
+/// the first within one batch, so a repeat gets `_2`, `_3`, and so on before the extension.
+fn unique_filename(name: String, taken: &mut HashSet<String>) -> String {
+    let path = std::path::Path::new(&name);
+    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or(&name).to_string();
+    let ext = path.extension().and_then(|e| e.to_str()).map(|e| format!(".{e}")).unwrap_or_default();
+    let mut candidate = name;
+    let mut n = 2;
+    while !taken.insert(candidate.clone()) {
+        candidate = format!("{stem}_{n}{ext}");
+        n += 1;
+    }
+    candidate
 }
 
 async fn run_fetch(cli: &Cli, args: &FetchArgs) -> Result<()> {
@@ -662,7 +670,7 @@ mod tests {
         let tasks = build_download_tasks(&replies, true);
 
         assert_eq!(tasks.len(), 1);
-        assert!(tasks[0].dest_filename.contains("main.pdf"));
+        assert_eq!(tasks[0].dest_filename, "20260901_BBCA_Judul.pdf");
     }
 
     #[test]
@@ -676,7 +684,7 @@ mod tests {
 
         let tasks = build_download_tasks(&replies, false);
 
-        assert_eq!(tasks[0].dest_filename, "20260901_BBCA_main.pdf");
+        assert_eq!(tasks[0].dest_filename, "20260901_BBCA_Judul.pdf");
     }
 
     #[test]
@@ -689,6 +697,40 @@ mod tests {
         let tasks = build_download_tasks(&replies, false);
 
         assert_eq!(tasks.len(), 3);
+    }
+
+    #[test]
+    fn build_download_tasks_keeps_same_titled_announcements_from_colliding() {
+        let replies = vec![
+            reply("id1", "2026-09-01", "BBCA", vec![attachment("a.pdf", false)]),
+            reply("id2", "2026-09-01", "BBCA", vec![attachment("b.pdf", false)]),
+            reply("id3", "2026-09-01", "BBCA", vec![attachment("c.pdf", false)]),
+        ];
+
+        let names: Vec<_> = build_download_tasks(&replies, false)
+            .into_iter()
+            .map(|t| t.dest_filename)
+            .collect();
+
+        assert_eq!(
+            names,
+            ["20260901_BBCA_Judul.pdf", "20260901_BBCA_Judul_2.pdf", "20260901_BBCA_Judul_3.pdf"]
+        );
+    }
+
+    #[test]
+    fn build_download_tasks_names_do_not_shift_under_main_only() {
+        let replies = vec![reply(
+            "id1",
+            "2026-09-01",
+            "BBCA",
+            vec![attachment("a.pdf", true), attachment("b.pdf", false)],
+        )];
+
+        let tasks = build_download_tasks(&replies, true);
+
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].dest_filename, "20260901_BBCA_Judul.pdf");
     }
 
     #[test]

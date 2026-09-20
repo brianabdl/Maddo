@@ -119,7 +119,8 @@ function files(attachments) {
   td.className = 'files';
   attachments.forEach((att, i) => {
     const a = document.createElement('a');
-    a.href = '/api/file?url=' + encodeURIComponent(att.FullSavePath);
+    a.href = '/api/file?url=' + encodeURIComponent(att.FullSavePath) +
+      '&name=' + encodeURIComponent(att.SuggestedFilename || '');
     a.target = '_blank';
     a.rel = 'noopener';
     a.textContent = att.IsAttachment ? 'attachment ' + i : 'document';

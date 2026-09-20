@@ -152,6 +152,11 @@ authenticates as anyone or reaches non-public data.
   decoded/written to disk on the Rust side, batched via `Promise.all`
   inside one `page.evaluate()` call per batch. Both variants sleep
   `--delay-ms` between batches.
+  Saved files are named from the announcement title, not IDX's hashed
+  `PDFFilename`: `attachment_filenames()` builds
+  `<date>_<ticker>_<title>.<ext>` (supporting files get `_attachment<N>`), and
+  `build_download_tasks` in `main.rs` adds `_2`, `_3` when two announcements in
+  one batch share a name. The `live` server reuses the same function.
 
 - **`src/main.rs`** — CLI surface (`clap`) and orchestration. Four
   subcommands; `fetch`, `download`, and `watch` share `CoreFilterArgs`
@@ -185,7 +190,10 @@ authenticates as anyone or reaches non-public data.
   one attachment back via `Backend::get_bytes`. That last route is a proxy,
   not an open relay: it rejects any URL not starting with
   `https://www.idx.co.id/`, so the page cannot use the impersonating client
-  to reach arbitrary hosts. `run_live` shares one `Backend` across
+  to reach arbitrary hosts. It also sends `Content-Disposition` with the readable
+  name (the page passes it as `name`, taken from the `SuggestedFilename` that
+  `/api/announcements` adds to each attachment), so saving no longer yields
+  `file.pdf`. `run_live` shares one `Backend` across
   connection handlers as an `Arc`, then reclaims sole ownership (retrying
   for up to ~2s) before `close()`, since a `--browser` session must be shut
   down explicitly and connection tasks hold their own clones. The bind

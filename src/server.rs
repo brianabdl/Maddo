@@ -15,12 +15,14 @@ use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
-use crate::api::QueryParams;
+use crate::api::{QueryParams, Reply};
 use crate::backend::Backend;
+use crate::download;
 
 const INDEX_HTML: &str = include_str!("ui/index.html");
 const IDX_PREFIX: &str = "https://www.idx.co.id/";
 const MAX_REQUEST_BYTES: usize = 8 * 1024;
+const MAX_FILENAME_CHARS: usize = 200;
 
 /// Serves until the returned future is dropped (the caller races it against Ctrl+C).
 pub async fn serve(backend: Arc<Backend>, addr: SocketAddr) -> Result<()> {
@@ -63,7 +65,17 @@ async fn handle(mut stream: TcpStream, backend: Arc<Backend>) -> Result<()> {
             }
         },
         "/api/file" => match file(&backend, &query).await {
-            Ok(bytes) => respond(&mut stream, "200 OK", "application/pdf", &bytes).await,
+            Ok(bytes) => {
+                let disposition = content_disposition(&download_name(&query));
+                respond_with_headers(
+                    &mut stream,
+                    "200 OK",
+                    "application/pdf",
+                    &[("Content-Disposition", &disposition)],
+                    &bytes,
+                )
+                .await
+            }
             Err(e) => {
                 let body = format!("{e:#}");
                 respond(&mut stream, "502 Bad Gateway", "text/plain", body.as_bytes()).await
@@ -93,13 +105,24 @@ async fn announcements(backend: &Backend, query: &[(String, String)]) -> Result<
     };
 
     let resp = backend.fetch_announcements(&params).await?;
+    let replies = resp.replies.iter().map(with_suggested_filenames).collect::<Result<Vec<_>>>()?;
     Ok(serde_json::json!({
         "resultCount": resp.result_count,
         "page": page,
         "pageSize": page_size,
-        "replies": resp.replies,
+        "replies": replies,
     })
     .to_string())
+}
+
+/// `reply` as JSON, with a `SuggestedFilename` added to each attachment so the page can
+/// ask `/api/file` to save it under a readable name instead of IDX's hash.
+fn with_suggested_filenames(reply: &Reply) -> Result<serde_json::Value> {
+    let mut value = serde_json::to_value(reply).context("serializing announcement")?;
+    for (i, name) in download::attachment_filenames(reply).into_iter().enumerate() {
+        value["attachments"][i]["SuggestedFilename"] = name.into();
+    }
+    Ok(value)
 }
 
 async fn file(backend: &Backend, query: &[(String, String)]) -> Result<Vec<u8>> {
@@ -108,6 +131,25 @@ async fn file(backend: &Backend, query: &[(String, String)]) -> Result<Vec<u8>> 
         anyhow::bail!("refusing to proxy a URL outside {IDX_PREFIX}");
     }
     backend.get_bytes(url).await
+}
+
+/// The filename to offer for `/api/file`: the page's `name` parameter, else the last
+/// segment of the IDX URL. Sanitized either way, since it ends up in a response header.
+fn download_name(query: &[(String, String)]) -> String {
+    let requested = param(query, "name").unwrap_or_default();
+    let from_url = param(query, "url").and_then(|u| u.rsplit('/').next()).unwrap_or_default();
+    [requested, from_url]
+        .into_iter()
+        .map(|n| download::sanitize_filename(n, MAX_FILENAME_CHARS))
+        .find(|n| !n.is_empty())
+        .unwrap_or_else(|| "file.pdf".to_string())
+}
+
+/// `inline` keeps the PDF opening in the tab; the filename applies when it's saved. The
+/// plain `filename` is an ASCII fallback, `filename*` carries the real name (RFC 6266).
+fn content_disposition(name: &str) -> String {
+    let ascii: String = name.chars().map(|c| if c.is_ascii() { c } else { '_' }).collect();
+    format!("inline; filename=\"{ascii}\"; filename*=UTF-8''{}", percent_encode(name))
 }
 
 /// Reads request headers and returns the request target from the request line. Returns
@@ -138,14 +180,20 @@ async fn read_request_target(stream: &mut TcpStream) -> Result<Option<String>> {
     }
 }
 
-async fn respond(
+async fn respond(stream: &mut TcpStream, status: &str, content_type: &str, body: &[u8]) -> Result<()> {
+    respond_with_headers(stream, status, content_type, &[], body).await
+}
+
+async fn respond_with_headers(
     stream: &mut TcpStream,
     status: &str,
     content_type: &str,
+    headers: &[(&str, &str)],
     body: &[u8],
 ) -> Result<()> {
+    let extra: String = headers.iter().map(|(k, v)| format!("{k}: {v}\r\n")).collect();
     let head = format!(
-        "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\n{extra}Content-Length: {}\r\nConnection: close\r\n\r\n",
         body.len()
     );
     stream.write_all(head.as_bytes()).await.context("writing response head")?;
@@ -210,6 +258,16 @@ fn percent_decode(s: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
+/// Encodes every byte outside the RFC 3986 unreserved set, as `filename*` requires.
+fn percent_encode(s: &str) -> String {
+    s.bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => (b as char).to_string(),
+            _ => format!("%{b:02X}"),
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -258,6 +316,61 @@ mod tests {
         assert_eq!(non_empty(Some("  BBCA ")).as_deref(), Some("BBCA"));
         assert_eq!(non_empty(Some("   ")), None);
         assert_eq!(non_empty(None), None);
+    }
+
+    #[test]
+    fn percent_encode_escapes_everything_but_unreserved_bytes() {
+        assert_eq!(percent_encode("a b-c_d.e~"), "a%20b-c_d.e~");
+        assert_eq!(percent_encode("€"), "%E2%82%AC");
+    }
+
+    #[test]
+    fn content_disposition_carries_ascii_fallback_and_encoded_name() {
+        assert_eq!(
+            content_disposition("20260901_BBCA_Laporan – Tahunan.pdf"),
+            "inline; filename=\"20260901_BBCA_Laporan _ Tahunan.pdf\"; \
+             filename*=UTF-8''20260901_BBCA_Laporan%20%E2%80%93%20Tahunan.pdf"
+        );
+    }
+
+    #[test]
+    fn download_name_prefers_the_requested_name_and_sanitizes_it() {
+        let q = parse_query("url=https%3A%2F%2Fwww.idx.co.id%2Fa%2Fhash.pdf&name=x%22%0D%0AEvil%3A%20y.pdf");
+        let name = download_name(&q);
+        assert!(!name.contains(['"', '\r', '\n', ':']));
+        assert_eq!(name, "x_ Evil_ y.pdf");
+    }
+
+    #[test]
+    fn download_name_falls_back_to_the_url_segment_then_a_default() {
+        let q = parse_query("url=https%3A%2F%2Fwww.idx.co.id%2Fa%2Fhash.pdf");
+        assert_eq!(download_name(&q), "hash.pdf");
+        assert_eq!(download_name(&[]), "file.pdf");
+    }
+
+    #[test]
+    fn suggested_filenames_are_added_to_each_attachment() {
+        use crate::api::{AttachmentInfo, Pengumuman};
+        let reply = Reply {
+            pengumuman: Pengumuman {
+                id2: "id1".to_string(),
+                no_pengumuman: "001/X/2026".to_string(),
+                tanggal: "2026-09-01T18:02:45".to_string(),
+                judul: "Judul".to_string(),
+                jenis: "STOCK".to_string(),
+                kode_emiten: "BBCA".to_string(),
+            },
+            attachments: vec![AttachmentInfo {
+                filename: "e45bf0b681_5f51678b83.pdf".to_string(),
+                url: "https://www.idx.co.id/x.pdf".to_string(),
+                is_supporting: false,
+            }],
+        };
+
+        let value = with_suggested_filenames(&reply).unwrap();
+
+        assert_eq!(value["attachments"][0]["SuggestedFilename"], "20260901_BBCA_Judul.pdf");
+        assert_eq!(value["attachments"][0]["PDFFilename"], "e45bf0b681_5f51678b83.pdf");
     }
 
     #[tokio::test]
