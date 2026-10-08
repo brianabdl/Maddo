@@ -19,7 +19,7 @@ pub struct QueryParams {
     pub emiten_type: String, // "*", "s", "o", "etf", "dd", "eba"
     pub date_from: String,   // YYYYMMDD
     pub date_to: String,     // YYYYMMDD
-    pub index_from: u32,
+    pub index_from: u32,     // zero-based page index, not a row offset: IDX skips index_from * page_size rows
     pub page_size: u32,
     pub lang: String,
 }

@@ -269,7 +269,7 @@ async fn fetch_filtered(
             emiten_type: filter.core.emiten_type(),
             date_from: date_from.clone(),
             date_to: date_to.clone(),
-            index_from: (page_num - 1) * filter.page_size,
+            index_from: page_num - 1,
             page_size: filter.page_size,
             lang: filter.core.lang.clone(),
         };

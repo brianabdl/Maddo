@@ -99,7 +99,7 @@ async fn announcements(backend: &Backend, query: &[(String, String)]) -> Result<
         date_from: compact_date(param(query, "dateFrom")).unwrap_or_else(|| "19010101".to_string()),
         date_to: compact_date(param(query, "dateTo"))
             .unwrap_or_else(|| chrono::Local::now().format("%Y%m%d").to_string()),
-        index_from: (page - 1) * page_size,
+        index_from: page - 1,
         page_size,
         lang: non_empty(param(query, "lang")).unwrap_or_else(|| "id".to_string()),
     };
